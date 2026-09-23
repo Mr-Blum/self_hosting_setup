@@ -27,6 +27,19 @@ err()   { printf '%s fail%s %s\n' "${C_RED}"   "${C_RESET}" "$*" >&2; }
 dim()   { printf '%s     %s%s\n' "${C_DIM}"    "$*" "${C_RESET}"; }
 die()   { err "$*"; exit 1; }
 
+# --- Temp files -----------------------------------------------------------
+# One temp dir per run, removed on exit. Do NOT use `trap ... RETURN` for
+# per-function temp files: a RETURN trap in bash is not function-scoped, so it
+# fires again on later returns when the function-local variable is gone, and
+# under `set -u` that aborts the script after the work already succeeded.
+STACK_TMPDIR="$(mktemp -d "${TMPDIR:-/tmp}/stack.XXXXXX")"
+# shellcheck disable=SC2317
+_stack_cleanup() { rm -rf "${STACK_TMPDIR}"; }
+trap _stack_cleanup EXIT
+
+# Print a path for a run-scoped temp file with the given name.
+stack_tmp() { printf '%s/%s\n' "${STACK_TMPDIR}" "$1"; }
+
 # --- Preconditions --------------------------------------------------------
 have() { command -v "$1" >/dev/null 2>&1; }
 
@@ -91,6 +104,25 @@ wait_for_ollama() {
 # True if the given model tag is already present locally.
 model_present() {
     ollama list 2>/dev/null | awk 'NR>1{print $1}' | grep -qxF "$1"
+}
+
+# --- OpenCode helpers -----------------------------------------------------
+# The official installer hardcodes its install directory, so never assume a
+# path: locate the binary. Prints the full path on success, nothing on failure.
+find_opencode() {
+    if have opencode; then
+        command -v opencode
+        return 0
+    fi
+    local d
+    for d in "${OPENCODE_INSTALL_DIR}" "${HOME}/.opencode/bin" \
+             "${HOME}/.local/bin" /usr/local/bin; do
+        if [ -x "${d}/opencode" ]; then
+            printf '%s\n' "${d}/opencode"
+            return 0
+        fi
+    done
+    return 1
 }
 
 # --- Config rendering -----------------------------------------------------

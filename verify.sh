@@ -64,22 +64,31 @@ check_service() {
 # ---------------------------------------------------------------------------
 # The single most common silent failure: the systemd override was never
 # applied, so Ollama is still serving a 4096-token context.
+#
+# Read the configured environment via `systemctl show`, which is a read-only
+# query available to unprivileged users - no sudo prompt. Because that reports
+# what systemd is *configured* to pass (not what the running process actually
+# got), we additionally prove the service was restarted after the drop-in was
+# last written. Together those cover the same ground as reading
+# /proc/<pid>/environ, without needing root.
 check_tuning() {
     log "[2/6] effective tuning"
 
-    local pid env_data
-    pid="$(pgrep -f 'ollama serve' | head -1 || true)"
-    if [ -z "${pid}" ]; then
-        warn "could not find the 'ollama serve' process; skipping env inspection"
+    if ! have systemctl; then
+        warn "no systemctl; cannot inspect service environment"
         return
     fi
 
-    # /proc/<pid>/environ is NUL-separated and root-owned for another user's
-    # process, so this needs sudo. Degrade gracefully if unavailable.
-    if ! env_data="$(as_root cat "/proc/${pid}/environ" 2>/dev/null | tr '\0' '\n')"; then
-        warn "cannot read /proc/${pid}/environ (needs sudo); skipping"
+    local env_line
+    env_line="$(systemctl show ollama --property=Environment --value 2>/dev/null)"
+    if [ -z "${env_line}" ]; then
+        warn "systemd reports no Environment for ollama.service; override missing?"
         return
     fi
+
+    # Values here contain no spaces, so whitespace splitting is safe.
+    local env_data
+    env_data="$(printf '%s\n' "${env_line}" | tr ' ' '\n' | sed 's/^"//; s/"$//')"
 
     local var expected actual
     for var in OLLAMA_CONTEXT_LENGTH:"${OLLAMA_CTX}" \
@@ -93,11 +102,40 @@ check_tuning() {
         if [ "${actual}" = "${expected}" ]; then
             ok "${var}=${actual}"
         elif [ -z "${actual}" ]; then
-            fail "${var} is unset in the running service (expected ${expected}) - override not applied?"
+            fail "${var} is unset in the unit config (expected ${expected}) - override not applied?"
         else
             fail "${var}=${actual} but expected ${expected}"
         fi
     done
+
+    check_config_is_live
+}
+
+# Prove the running process actually picked up the current config, rather than
+# still running with whatever was in effect before the last edit.
+check_config_is_live() {
+    if [ "$(systemctl show ollama --property=NeedDaemonReload --value 2>/dev/null)" = "yes" ]; then
+        fail "systemd needs a daemon-reload; the unit on disk differs from what is loaded"
+        dim  "fix: sudo systemctl daemon-reload && sudo systemctl restart ollama"
+        return
+    fi
+
+    local dropin="/etc/systemd/system/ollama.service.d/10-local-stack.conf"
+    [ -f "${dropin}" ] || { warn "drop-in not found at ${dropin}"; return; }
+
+    local started_raw started_epoch dropin_epoch
+    started_raw="$(systemctl show ollama --property=ActiveEnterTimestamp --value 2>/dev/null)"
+    [ -n "${started_raw}" ] || return 0
+
+    started_epoch="$(date -d "${started_raw}" +%s 2>/dev/null)" || return 0
+    dropin_epoch="$(stat -c %Y "${dropin}" 2>/dev/null)" || return 0
+
+    if [ "${dropin_epoch}" -gt "${started_epoch}" ]; then
+        fail "the tuning config was modified after ollama last started - it is NOT in effect"
+        dim  "fix: sudo systemctl restart ollama"
+    else
+        ok "config is live (service started after the last config change)"
+    fi
 }
 
 # ---------------------------------------------------------------------------
@@ -170,6 +208,30 @@ check_gpu_fit() {
                 dim "  3. make sure nothing else is using the GPU (nvidia-smi)"
                 ;;
         esac
+
+        # 'ollama ps' reports the context the model was actually loaded with.
+        # This is stronger evidence than checking env vars, because it proves
+        # the setting survived all the way to the loaded model.
+        # Anchor on the PROCESSOR column (".. GPU" / ".. CPU/GPU") and take the
+        # next field: picking "first big integer" would misread an all-digit
+        # model ID as the context.
+        local served_ctx
+        served_ctx="$(printf '%s\n' "${line}" | awk '
+            {
+                for (i = 1; i <= NF; i++) {
+                    if ($i ~ /^(CPU|GPU|CPU\/GPU|GPU\/CPU)$/ && $(i+1) ~ /^[0-9]+$/) {
+                        print $(i+1); exit
+                    }
+                }
+            }')"
+        if [ -n "${served_ctx}" ]; then
+            if [ "${served_ctx}" = "${OLLAMA_CTX}" ]; then
+                ok "${m}: serving ${served_ctx} tokens of context"
+            else
+                fail "${m}: loaded with ${served_ctx} context, expected ${OLLAMA_CTX}"
+                dim "OpenCode is configured for ${OLLAMA_CTX}; a mismatch overflows silently"
+            fi
+        fi
 
         if have nvidia-smi; then
             local used total
@@ -266,10 +328,21 @@ JSON
 check_opencode() {
     log "[6/6] OpenCode"
 
-    if have opencode; then
-        ok "opencode on PATH ($(opencode --version 2>/dev/null | head -1))"
+    # The installer appends to ~/.bashrc, which the current shell has not
+    # re-sourced. A missing PATH entry here is not an install failure, so it
+    # must not fail the run - it just needs a new shell.
+    local oc_path
+    if oc_path="$(find_opencode)"; then
+        if have opencode; then
+            ok "opencode on PATH ($("${oc_path}" --version 2>/dev/null | head -1)) at ${oc_path}"
+        else
+            warn "opencode is installed but not on PATH in this shell"
+            dim  "installed: ${oc_path} ($("${oc_path}" --version 2>/dev/null | head -1))"
+            dim  "the installer added it to ~/.bashrc - open a new terminal, or run:"
+            dim  "  source ~/.bashrc"
+        fi
     else
-        fail "opencode not on PATH (is ${OPENCODE_INSTALL_DIR} in your PATH?)"
+        fail "opencode binary not found (looked on PATH, ${OPENCODE_INSTALL_DIR}, ~/.local/bin)"
     fi
 
     local cfg="${OPENCODE_CONFIG_DIR}/opencode.json"

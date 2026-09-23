@@ -191,22 +191,21 @@ UNIT
 # ---------------------------------------------------------------------------
 tune_ollama() {
     log "applying Ollama tuning (context=${OLLAMA_CTX}, kv=${OLLAMA_KV_CACHE}, max_loaded=${OLLAMA_MAX_LOADED})"
-    prime_sudo
 
     local dropin_dir=/etc/systemd/system/ollama.service.d
     local dropin="${dropin_dir}/10-local-stack.conf"
     local tmp
-    tmp="$(mktemp)"
-    trap 'rm -f "${tmp}"' RETURN
+    tmp="$(stack_tmp override.conf)"
 
     render_template "${STACK_ROOT}/config/ollama-override.conf.tmpl" "${tmp}"
 
-    as_root mkdir -p "${dropin_dir}"
-
-    # Only restart the service if the config actually changed.
-    if as_root test -f "${dropin}" && as_root cmp -s "${tmp}" "${dropin}"; then
+    # The drop-in is world-readable (0644), so compare BEFORE escalating.
+    # A re-run that changes nothing must not prompt for a sudo password.
+    if [ -f "${dropin}" ] && cmp -s "${tmp}" "${dropin}"; then
         ok "systemd override already up to date"
     else
+        prime_sudo
+        as_root mkdir -p "${dropin_dir}"
         as_root cp "${tmp}" "${dropin}"
         as_root chmod 0644 "${dropin}"
         ok "wrote ${dropin}"
@@ -215,7 +214,11 @@ tune_ollama() {
         as_root systemctl restart ollama
     fi
 
-    as_root systemctl is-enabled --quiet ollama || as_root systemctl enable ollama
+    # 'is-enabled' is an unprivileged query; only escalate if it must change.
+    if ! systemctl is-enabled --quiet ollama 2>/dev/null; then
+        prime_sudo
+        as_root systemctl enable ollama
+    fi
     wait_for_ollama 90
 }
 
@@ -252,40 +255,39 @@ pull_models() {
 # 4. OpenCode
 # ---------------------------------------------------------------------------
 install_opencode() {
-    if have opencode; then
-        ok "OpenCode already installed ($(opencode --version 2>/dev/null | head -1))"
+    local oc_path
+    if oc_path="$(find_opencode)"; then
+        ok "OpenCode already installed ($("${oc_path}" --version 2>/dev/null | head -1)) at ${oc_path}"
         return 0
     fi
 
     log "installing OpenCode"
-    mkdir -p "${OPENCODE_INSTALL_DIR}"
 
     if [ "${OFFLINE}" -eq 1 ]; then
         local tgz
         tgz="$(find "${BUNDLE_DIR}" -maxdepth 1 -name 'opencode-linux-x64*.tar.gz' | head -1)"
         [ -n "${tgz}" ] || die "offline install needs an opencode tarball in ${BUNDLE_DIR}"
-        log "extracting $(basename "${tgz}")"
+        log "extracting $(basename "${tgz}") to ${OPENCODE_INSTALL_DIR}"
+        mkdir -p "${OPENCODE_INSTALL_DIR}"
         tar -C "${OPENCODE_INSTALL_DIR}" -xzf "${tgz}"
         chmod +x "${OPENCODE_INSTALL_DIR}/opencode" 2>/dev/null || true
     else
-        # Must be exported, not prefixed: a `VAR=x curl | bash` prefix would
-        # scope the variable to curl instead of the bash that runs the script.
-        export OPENCODE_INSTALL_DIR
+        # Note: the official installer hardcodes $HOME/.opencode/bin and
+        # honours no install-dir override, so we do not try to set one. It
+        # also appends that directory to ~/.bashrc itself.
         [ -n "${OPENCODE_VERSION}" ] && export OPENCODE_VERSION
         curl -fsSL https://opencode.ai/install | bash
     fi
 
-    if ! have opencode; then
-        case ":${PATH}:" in
-            *":${OPENCODE_INSTALL_DIR}:"*) ;;
-            *)
-                warn "${OPENCODE_INSTALL_DIR} is not on your PATH."
-                warn "add this to your ~/.bashrc:"
-                dim  "export PATH=\"${OPENCODE_INSTALL_DIR}:\$PATH\""
-                ;;
-        esac
+    if ! oc_path="$(find_opencode)"; then
+        die "OpenCode install finished but no binary was found"
     fi
-    ok "OpenCode installed to ${OPENCODE_INSTALL_DIR}"
+    ok "OpenCode installed at ${oc_path}"
+
+    if ! have opencode; then
+        warn "not on PATH in this shell yet - open a new terminal or:"
+        dim  "  source ~/.bashrc"
+    fi
 }
 
 # ---------------------------------------------------------------------------
@@ -297,8 +299,7 @@ write_opencode_config() {
     mkdir -p "${OPENCODE_CONFIG_DIR}"
 
     local tmp
-    tmp="$(mktemp)"
-    trap 'rm -f "${tmp}"' RETURN
+    tmp="$(stack_tmp opencode.json)"
     render_template "${STACK_ROOT}/config/opencode.json.tmpl" "${tmp}"
 
     # Validate before installing so we never leave a broken config behind.

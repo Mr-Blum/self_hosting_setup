@@ -193,7 +193,7 @@ they break.
 |---|---|
 | Tool calls fail / agent loses track mid-task | Context too small. `verify.sh` check 2 confirms whether the override actually reached the running process. |
 | Everything is glacially slow | Model spilled to system RAM. `verify.sh` check 4, then the ladder above. |
-| `opencode` not found | `~/.local/bin` not on `PATH`. |
+| `opencode` not found | `~/.opencode/bin` not on `PATH`. The installer appends it to `~/.bashrc`, so open a new terminal or `source ~/.bashrc`. |
 | Models missing after a restore | Ownership. `sudo chown -R ollama:ollama /usr/share/ollama` |
 | Config edits have no effect | Project-level `opencode.json` overrides the global one. |
 
