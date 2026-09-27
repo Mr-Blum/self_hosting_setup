@@ -21,16 +21,19 @@ set -euo pipefail
 OUT_DIR="${STACK_ROOT}/bundle"
 MAKE_TAR=0
 INCLUDE_MODELS=1
+HASH_MODELS=1
 
 usage() {
     cat <<'EOF'
 Usage: ./bundle.sh [options]
 
 Options:
-  --out DIR       Output directory (default: ./bundle)
-  --tar           Also produce DIR.tar for transfer to removable media
-  --no-models     Skip model blobs (bundle is then ~150MB instead of ~40GB)
-  -h, --help      Show this help
+  --out DIR           Output directory (default: ./bundle)
+  --tar               Also produce DIR.tar for transfer to removable media
+  --no-models         Skip model blobs (bundle is ~150MB instead of ~40GB)
+  --no-hash-models    Skip checksumming the weights (faster, but restore.sh
+                      can then no longer verify them - not recommended)
+  -h, --help          Show this help
 
 The model blobs are the bulk of the bundle. Copying them beats re-pulling
 ~37GB per machine, and Ollama's store is content-addressed so it transfers
@@ -40,11 +43,12 @@ EOF
 
 while [ $# -gt 0 ]; do
     case "$1" in
-        --out)       OUT_DIR="${2:?--out needs a directory}"; shift 2 ;;
-        --tar)       MAKE_TAR=1; shift ;;
-        --no-models) INCLUDE_MODELS=0; shift ;;
-        -h|--help)   usage; exit 0 ;;
-        *)           err "unknown option: $1"; usage; exit 2 ;;
+        --out)            OUT_DIR="${2:?--out needs a directory}"; shift 2 ;;
+        --tar)            MAKE_TAR=1; shift ;;
+        --no-models)      INCLUDE_MODELS=0; shift ;;
+        --no-hash-models) HASH_MODELS=0; shift ;;
+        -h|--help)        usage; exit 0 ;;
+        *)                err "unknown option: $1"; usage; exit 2 ;;
     esac
 done
 
@@ -135,6 +139,9 @@ copy_models() {
     log "copying model store (this moves tens of GB)"
     mkdir -p "${OUT_DIR}/models"
 
+    # Refuse to start a multi-gigabyte copy that cannot finish.
+    require_space "${OUT_DIR}" "$(dir_size_kb "${OLLAMA_MODELS_DIR}")" "model store copy"
+
     # rsync gives resumability on a large copy; fall back to cp -a.
     if have rsync; then
         as_root rsync -a --info=progress2 \
@@ -146,6 +153,39 @@ copy_models() {
     # The copy runs as root; hand ownership back so the bundle is portable.
     as_root chown -R "$(id -u):$(id -g)" "${OUT_DIR}/models"
     ok "model store bundled ($(du -sh "${OUT_DIR}/models" | cut -f1))"
+}
+
+# ---------------------------------------------------------------------------
+# Checksum the model payload.
+#
+# MANIFEST.txt only covers top-level files (find -maxdepth 1), so without this
+# the ~37GB of weights would ship unverified and restore.sh would still print
+# "checksums match" - the multi-gigabyte payload most likely to be corrupted by
+# a USB transfer being the one thing not checked.
+#
+# Blobs are additionally content-addressed (named sha256-<digest> of their own
+# contents), but manifests/ files are not, so we hash everything under models/.
+# ---------------------------------------------------------------------------
+hash_models() {
+    [ "${INCLUDE_MODELS}" -eq 1 ] || return 0
+    [ -d "${OUT_DIR}/models" ] || return 0
+
+    local out="${OUT_DIR}/MODELS.sha256"
+
+    if [ "${HASH_MODELS}" -eq 0 ]; then
+        rm -f "${out}"
+        warn "skipping model checksums (--no-hash-models)"
+        warn "restore.sh will NOT be able to verify the weights"
+        return 0
+    fi
+
+    local count
+    count="$(find "${OUT_DIR}/models" -type f | wc -l)"
+    log "checksumming ${count} model file(s) - reads the full payload, be patient"
+
+    # Sorted, NUL-delimited for deterministic output and safe filenames.
+    ( cd "${OUT_DIR}" && find models -type f -print0 | sort -z | xargs -0 sha256sum ) > "${out}"
+    ok "wrote MODELS.sha256 ($(wc -l < "${out}") entries)"
 }
 
 # ---------------------------------------------------------------------------
@@ -179,8 +219,17 @@ write_manifest() {
         echo "context_length:   ${OLLAMA_CTX}"
         echo "kv_cache_type:    ${OLLAMA_KV_CACHE}"
         echo "models:           ${STACK_MODELS}"
+        if [ -f "${OUT_DIR}/MODELS.sha256" ]; then
+            echo "weights_verified: yes ($(wc -l < "${OUT_DIR}/MODELS.sha256") files in MODELS.sha256)"
+        elif [ "${INCLUDE_MODELS}" -eq 1 ]; then
+            echo "weights_verified: NO - weights are unchecked in this bundle"
+        else
+            echo "weights_verified: n/a (no models bundled)"
+        fi
         echo
         echo "## sha256"
+        # Top-level files only. Everything under models/ is covered separately
+        # by MODELS.sha256, which is itself hashed here.
         ( cd "${OUT_DIR}" && find . -maxdepth 1 -type f \
             ! -name 'MANIFEST.txt' -exec sha256sum {} \; 2>/dev/null ) || true
         echo
@@ -198,6 +247,9 @@ write_manifest() {
 make_tarball() {
     [ "${MAKE_TAR}" -eq 1 ] || return 0
     local tarball="${OUT_DIR%/}.tar"
+    # The tar sits alongside the bundle, so this needs a second full copy's
+    # worth of space. Check before spending an hour discovering otherwise.
+    require_space "$(dirname "${OUT_DIR}")" "$(dir_size_kb "${OUT_DIR}")" "tarball"
     log "creating ${tarball} (not compressed: model blobs are already compressed)"
     tar -cf "${tarball}" -C "$(dirname "${OUT_DIR}")" "$(basename "${OUT_DIR}")"
     ok "tarball: ${tarball} ($(du -sh "${tarball}" | cut -f1))"
@@ -207,6 +259,7 @@ main() {
     fetch_ollama
     fetch_opencode
     copy_models
+    hash_models
     copy_stack
     write_manifest
     make_tarball

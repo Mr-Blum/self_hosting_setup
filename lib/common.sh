@@ -82,6 +82,22 @@ prime_sudo() {
 }
 
 # --- Ollama helpers -------------------------------------------------------
+# OLLAMA_BIND must be host:port. The systemd override feeds it to the server
+# as a bind address, and we feed it to clients as a target, so a URL form
+# would be wrong in one of those places. Fail fast rather than half-work.
+case "${OLLAMA_BIND}" in
+    http://*|https://*)
+        die "OLLAMA_BIND must be host:port (e.g. 127.0.0.1:11434), not a URL: ${OLLAMA_BIND}"
+        ;;
+esac
+
+# The `ollama` CLI resolves its target from OLLAMA_HOST, while our curl calls
+# use OLLAMA_BIND. Left unlinked those diverge: pointing OLLAMA_BIND at another
+# machine would send health checks to the remote box while every
+# `ollama list/ps/pull` silently kept talking to localhost. Export one from the
+# other so a single variable is authoritative for both.
+export OLLAMA_HOST="${OLLAMA_BIND}"
+
 ollama_api() { printf 'http://%s' "${OLLAMA_BIND}"; }
 
 # Block until the Ollama HTTP API answers, or time out.
@@ -161,3 +177,42 @@ backup_file() {
 free_gb() { df -BG --output=avail "$1" 2>/dev/null | tail -1 | tr -dc '0-9'; }
 
 human_gb() { awk -v b="$1" 'BEGIN{printf "%.1f", b/1073741824}'; }
+
+# Size of a directory in KiB. Falls back to sudo, since the model store is
+# owned by the ollama user and unreadable to us.
+dir_size_kb() {
+    local d="$1" out
+    out="$(du -sk "${d}" 2>/dev/null | awk '{print $1}')"
+    if [ -z "${out}" ] && have sudo; then
+        out="$(sudo -n du -sk "${d}" 2>/dev/null | awk '{print $1}')"
+    fi
+    printf '%s' "${out}"
+}
+
+# Free space in KiB on the filesystem holding $1 (works for a path that does
+# not exist yet by walking up to the nearest existing ancestor).
+free_kb() {
+    local d="$1"
+    while [ -n "${d}" ] && [ ! -d "${d}" ]; do d="$(dirname "${d}")"; done
+    [ -n "${d}" ] || d=/
+    df -Pk "${d}" 2>/dev/null | awk 'NR==2{print $4}'
+}
+
+# Refuse to start a large copy that cannot finish. need_kb is padded by 5%.
+require_space() {
+    local target="$1" need_kb="$2" what="$3"
+    [ -n "${need_kb}" ] && [ "${need_kb}" -gt 0 ] 2>/dev/null || return 0
+
+    local avail_kb padded
+    avail_kb="$(free_kb "${target}")"
+    if [ -z "${avail_kb}" ]; then
+        warn "cannot determine free space on ${target}; proceeding without a check"
+        return 0
+    fi
+    padded=$(( need_kb + need_kb / 20 ))
+
+    if [ "${avail_kb}" -lt "${padded}" ]; then
+        die "not enough space for ${what}: need ~$(( padded / 1048576 ))GB (incl. 5% margin), have $(( avail_kb / 1048576 ))GB on ${target}"
+    fi
+    ok "space check (${what}): ~$(( padded / 1048576 ))GB needed, $(( avail_kb / 1048576 ))GB free"
+}

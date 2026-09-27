@@ -64,9 +64,41 @@ verify_checksums() {
         return 0
     fi
     if ( cd "${BUNDLE}" && printf '%s\n' "${sums}" | sha256sum -c --quiet ) 2>/dev/null; then
-        ok "checksums match"
+        ok "checksums match ($(printf '%s\n' "${sums}" | grep -c .) top-level file(s))"
     else
         die "bundle checksum mismatch - the transfer may be corrupt"
+    fi
+}
+
+# ---------------------------------------------------------------------------
+# Verify the model weights.
+#
+# MANIFEST.txt's sha256 section only covers top-level files, so the ~37GB of
+# weights need their own check - they are the payload most likely to be
+# corrupted in transit, and a silent bit-flip there presents as the model
+# being inexplicably stupid rather than as an obvious error.
+# ---------------------------------------------------------------------------
+verify_model_checksums() {
+    [ "${DO_MODELS}" -eq 1 ] || return 0
+    [ -d "${BUNDLE}/models" ] || return 0
+
+    local sums="${BUNDLE}/MODELS.sha256"
+    if [ ! -f "${sums}" ]; then
+        warn "no MODELS.sha256 in this bundle - the weights CANNOT be verified"
+        dim  "it was built either with --no-hash-models or by an older bundle.sh"
+        dim  "a corrupt blob will surface later as bad model output, not an error"
+        return 0
+    fi
+    if ! have sha256sum; then
+        warn "sha256sum unavailable; skipping weight verification"
+        return 0
+    fi
+
+    log "verifying model weights ($(wc -l < "${sums}") files; reads the full payload)"
+    if ( cd "${BUNDLE}" && sha256sum -c --quiet "${sums}" ); then
+        ok "model weights intact"
+    else
+        die "model weight checksum MISMATCH - transfer is corrupt, do not install this bundle"
     fi
 }
 
@@ -130,7 +162,17 @@ restore_models() {
     fi
 
     log "restoring model store to ${OLLAMA_MODELS_DIR}"
+
+    # Guard against a pathological OLLAMA_MODELS_DIR before any recursive
+    # ownership change happens below.
+    case "${OLLAMA_MODELS_DIR}" in
+        ""|/|/usr|/usr/share|/etc|/home|/var|/opt|/data|/mnt|/srv|/root)
+            die "refusing to operate on system directory OLLAMA_MODELS_DIR=${OLLAMA_MODELS_DIR}"
+            ;;
+    esac
+
     as_root mkdir -p "${OLLAMA_MODELS_DIR}"
+    require_space "${OLLAMA_MODELS_DIR}" "$(dir_size_kb "${src}")" "model store restore"
 
     if have rsync; then
         as_root rsync -a --info=progress2 "${src}/" "${OLLAMA_MODELS_DIR}/"
@@ -140,8 +182,13 @@ restore_models() {
 
     # Ollama runs as the 'ollama' user and will silently fail to see blobs
     # it cannot read. This chown is the step people most often forget.
+    #
+    # Scope this to the model directory itself. It previously chowned
+    # $(dirname "${OLLAMA_MODELS_DIR}"), which is harmless for the default
+    # path but would recursively chown an entire data volume to ollama:ollama
+    # for anyone who relocated the store (e.g. /data/models -> chown /data).
     log "fixing ownership for the ollama user"
-    as_root chown -R ollama:ollama "$(dirname "${OLLAMA_MODELS_DIR}")"
+    as_root chown -R ollama:ollama "${OLLAMA_MODELS_DIR}"
     ok "model store restored"
 }
 
@@ -175,6 +222,7 @@ install_opencode_offline() {
 # ---------------------------------------------------------------------------
 main() {
     verify_checksums
+    verify_model_checksums
     install_ollama_offline
     restore_models
     install_opencode_offline
