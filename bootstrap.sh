@@ -93,12 +93,7 @@ preflight() {
     fi
 
     if [ "${DO_MODELS}" -eq 1 ]; then
-        local avail
-        avail="$(free_gb /usr/share 2>/dev/null || free_gb / )"
-        if [ -n "${avail}" ] && [ "${avail}" -lt 45 ]; then
-            die "need ~45GB free for both models, found ${avail}GB"
-        fi
-        ok "disk space: ${avail}GB available"
+        require_space /usr/share $((45 * 1024 * 1024)) "model downloads"
     fi
 
     ensure_jq

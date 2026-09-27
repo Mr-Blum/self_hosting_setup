@@ -89,7 +89,7 @@ case "${OLLAMA_BIND}" in
     http://*|https://*)
         die "OLLAMA_BIND must be host:port (e.g. 127.0.0.1:11434), not a URL: ${OLLAMA_BIND}"
         ;;
-    *:*)
+    *:[0-9]*)
         # Valid host:port format - OK
         ;;
     *)
@@ -184,9 +184,6 @@ backup_file() {
 }
 
 # --- Misc -----------------------------------------------------------------
-# Free space in GB on the filesystem holding $1.
-free_gb() { df -BG --output=avail "$1" 2>/dev/null | tail -1 | tr -dc '0-9'; }
-
 human_gb() { awk -v b="$1" 'BEGIN{printf "%.1f", b/1073741824}'; }
 
 # Size of a directory in KiB. Falls back to sudo, since the model store is
