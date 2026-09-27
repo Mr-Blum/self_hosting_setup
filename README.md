@@ -194,8 +194,22 @@ they break.
 | Tool calls fail / agent loses track mid-task | Context too small. `verify.sh` check 2 confirms whether the override actually reached the running process. |
 | Everything is glacially slow | Model spilled to system RAM. `verify.sh` check 4, then the ladder above. |
 | `opencode` not found | `~/.opencode/bin` not on `PATH`. The installer appends it to `~/.bashrc`, so open a new terminal or `source ~/.bashrc`. |
-| Models missing after a restore | Ownership. `sudo chown -R ollama:ollama /usr/share/ollama` |
+| Models missing after a restore | Ownership. `sudo chown -R ollama:ollama <models_dir>` (now scoped to specific directory, not the parent) |
 | Config edits have no effect | Project-level `opencode.json` overrides the global one. |
+
+## Environment Configuration
+
+When using environment variables like `OLLAMA_BIND=<ip> ./bootstrap.sh --only-config`, ensure your `~/.bashrc` is also updated to maintain consistent configuration:
+
+```bash
+# After changing OLLAMA_BIND, update ~/.bashrc with:
+export OLLAMA_HOST="<ip>:11434"
+```
+
+This ensures `verify.sh` and other scripts use the correct base URL without reporting false mismatches.
+
+The current implementation now properly handles `OLLAMA_BIND` values with both host and port. The original validation was incomplete - it only caught URLs but not hostnames missing ports.
+
 
 Useful raw commands:
 

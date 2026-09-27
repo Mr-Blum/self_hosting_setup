@@ -89,6 +89,13 @@ case "${OLLAMA_BIND}" in
     http://*|https://*)
         die "OLLAMA_BIND must be host:port (e.g. 127.0.0.1:11434), not a URL: ${OLLAMA_BIND}"
         ;;
+    *:*)
+        # Valid host:port format - OK
+        ;;
+    *)
+        # Missing port part 
+        die "OLLAMA_BIND must include port (e.g. 127.0.0.1:11434), not just hostname: ${OLLAMA_BIND}"
+        ;;
 esac
 
 # The `ollama` CLI resolves its target from OLLAMA_HOST, while our curl calls
@@ -96,6 +103,10 @@ esac
 # machine would send health checks to the remote box while every
 # `ollama list/ps/pull` silently kept talking to localhost. Export one from the
 # other so a single variable is authoritative for both.
+# 
+# Note: This only affects the current execution. A proper fix for persistent
+# environment handling across shell sessions requires an updated bootstrap or
+# additional coordination between scripts.
 export OLLAMA_HOST="${OLLAMA_BIND}"
 
 ollama_api() { printf 'http://%s' "${OLLAMA_BIND}"; }
