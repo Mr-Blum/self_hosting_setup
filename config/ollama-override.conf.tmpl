@@ -1,0 +1,33 @@
+# Managed by self_hosted/bootstrap.sh - regenerate rather than hand-editing.
+# Installed to /etc/systemd/system/ollama.service.d/10-local-stack.conf
+#
+# Tuned for a single 24GB GPU (RTX A5000) serving one ~19GB q4 model at a
+# 64k context window. See README.md for the VRAM arithmetic.
+
+[Service]
+# Ollama defaults to a 4096-token context regardless of model capability.
+# That silently truncates agentic loops and breaks tool calling. OpenCode
+# requires 64k minimum.
+Environment="OLLAMA_CONTEXT_LENGTH=@OLLAMA_CTX@"
+
+# Flash attention must be on for KV cache quantization to apply.
+Environment="OLLAMA_FLASH_ATTENTION=@OLLAMA_FLASH_ATTN@"
+
+# Halves KV cache memory vs f16. Required to fit 64k alongside 19GB weights.
+Environment="OLLAMA_KV_CACHE_TYPE=@OLLAMA_KV_CACHE@"
+
+# One resident model only. Default is 3/GPU, which would try to co-load two
+# 19GB models on a 24GB card and spill into system RAM at ~1 token/sec.
+Environment="OLLAMA_MAX_LOADED_MODELS=@OLLAMA_MAX_LOADED@"
+
+# Parallel slots multiply KV allocation (2 slots x 64k = 128k of cache).
+Environment="OLLAMA_NUM_PARALLEL=@OLLAMA_PARALLEL@"
+
+# Keep the model warm between prompts; model loads cost 10-30s from NVMe.
+Environment="OLLAMA_KEEP_ALIVE=@OLLAMA_KEEPALIVE@"
+
+# Loopback only. There is no authentication in front of this API.
+Environment="OLLAMA_HOST=@OLLAMA_BIND@"
+
+# Fully local: no cloud models, no web search, nothing leaves the host.
+Environment="OLLAMA_NO_CLOUD=@OLLAMA_DISABLE_CLOUD@"
