@@ -169,13 +169,16 @@ check_gpu_fit() {
         # Keep only one model resident at a time on a 24GB card.
         local other
         for other in ${STACK_MODELS}; do
-            [ "${other}" = "${m}" ] || ollama stop "${other}" >/dev/null 2>&1 || true
+            if [ "${other}" != "${m}" ]; then
+                ollama stop "${other}" >/dev/null 2>&1 || true
+                wait_for_unload "${other}"
+            fi
         done
 
         dim "loading ${m} ..."
         # An empty prompt forces a load without generating tokens.
         if ! curl -fsS --max-time 300 "$(ollama_api)/api/generate" \
-                -d "$(printf '{"model":"%s","prompt":"","keep_alive":"5m"}' "${m}")" \
+                -d "$(printf '{"model":"%s","prompt":"hi","keep_alive":"5m"}' "${m}")" \
                 >/dev/null 2>&1; then
             fail "${m} failed to load"
             continue

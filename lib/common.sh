@@ -128,6 +128,18 @@ wait_for_ollama() {
     return 1
 }
 
+# Block until a model is no longer resident, or time out. 'ollama stop'
+# can return before the model is actually evicted from VRAM, so loading a
+# new model immediately afterward can race that eviction on a near-full GPU.
+wait_for_unload() {
+    local model="$1" timeout="${2:-30}" waited=0
+    while [ "${waited}" -lt "${timeout}" ]; do
+        ollama ps 2>/dev/null | awk 'NR>1{print $1}' | grep -qxF "${model}" || return 0
+        sleep 1; waited=$((waited + 1))
+    done
+    warn "${model} still resident ${timeout}s after 'ollama stop' - proceeding anyway"
+}
+
 # True if the given model tag is already present locally.
 model_present() {
     ollama list 2>/dev/null | awk 'NR>1{print $1}' | grep -qxF "$1"

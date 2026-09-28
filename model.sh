@@ -78,12 +78,13 @@ cmd_load() {
     for m in ${STACK_MODELS}; do
         if [ "${m}" != "${target}" ]; then
             ollama stop "${m}" >/dev/null 2>&1 || true
+            wait_for_unload "${m}"
         fi
     done
 
     log "loading ${target} at ${OLLAMA_CTX} context"
     curl -fsS --max-time 300 "$(ollama_api)/api/generate" \
-        -d "$(printf '{"model":"%s","prompt":"","keep_alive":"%s"}' \
+        -d "$(printf '{"model":"%s","prompt":"hi","keep_alive":"%s"}' \
               "${target}" "${OLLAMA_KEEPALIVE}")" >/dev/null \
         || die "failed to load ${target}"
 
